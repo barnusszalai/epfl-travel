@@ -127,6 +127,29 @@ struct MapView: UIViewRepresentable {
             // Find the corresponding stop and direction
             if let stopWithDirections = parent.stopsWithDirections.first(where: { $0.name == stopName }) {
                 if let direction = stopWithDirections.directions.first(where: { $0.to == directionTo }) {
+                    
+                    // Print passList for each vehicle in the direction
+                    for entry in direction.entries {
+                        print("Vehicle \(entry.number) to \(entry.to):")
+
+                        if let passList = entry.passList {
+                            // Print the first stop, checking if it's unknown
+                            if let firstStopName = passList.first?.station.name {
+                                print("\tStop 1: \(firstStopName)")
+                            } else {
+                                print("\tStop 1: \(stopWithDirections.name) (Current Stop)")  // Use the current stop name
+                            }
+
+                            // Print the remaining stops
+                            for (index, stopDetail) in passList.dropFirst().enumerated() {
+                                print("\tStop \(index + 2): \(stopDetail.station.name ?? "Unknown")")
+                            }
+                        } else {
+                            print("\tNo passList available for this vehicle")
+                        }
+                    }
+                    
+                    // Proceed with the existing onStopClick action
                     onStopClick(stopWithDirections, direction)
                 }
             }

@@ -14,6 +14,25 @@ struct TimetableView: View {
                 VStack(alignment: .leading) {
                     Text("\(entry.category) \(entry.number) to \(entry.to)")
                         .font(.headline)
+
+                    // Display the first stop from passList as the next stop
+                    if let passList = entry.passList, let nextStop = passList.first?.station.name {
+                        Text("Next Stop: \(nextStop)")
+                            .font(.subheadline)
+                    } else {
+                        Text("Next Stop: Unknown")
+                            .font(.subheadline)
+                    }
+
+                    // Display the final stop from passList
+                    if let passList = entry.passList, let finalStop = passList.last?.station.name {
+                        Text("Final Stop: \(finalStop)")
+                            .font(.subheadline)
+                    } else {
+                        Text("Final Stop: Unknown")
+                            .font(.subheadline)
+                    }
+
                     Text("Departure: \(formatDate(entry.stop.departure))")
                         .font(.subheadline)
                 }

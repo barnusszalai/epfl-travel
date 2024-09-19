@@ -1,0 +1,642 @@
+import SwiftUI
+
+struct TimetableView: View {
+    let stop: StopWithDirections
+    let direction: Direction
+
+    var body: some View {
+        VStack {
+            Text("Timetable for \(stop.name) to \(direction.to)")
+                .font(.headline)
+                .padding()
+
+            List(direction.entries) { entry in
+                VStack(alignment: .leading) {
+                    Text("\(entry.category) \(entry.number) to \(entry.to)")
+                        .font(.headline)
+                    Text("Departure: \(formatDate(entry.stop.departure))")
+                        .font(.subheadline)
+                }
+            }
+
+            Spacer()
+
+            Button(action: {
+                // Dismiss the view
+            }) {
+                Text("Close")
+                    .font(.headline)
+                    .padding()
+                    .frame(maxWidth: .infinity)
+                    .background(Color.blue)
+                    .foregroundColor(.white)
+                    .cornerRadius(10)
+            }
+            .padding()
+        }
+        .padding()
+    }
+
+    func formatDate(_ dateString: String) -> String {
+        // Convert ISO8601 date string to a user-friendly format
+        let isoFormatter = ISO8601DateFormatter()
+        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateStyle = .none
+        dateFormatter.timeStyle = .short
+
+        if let date = isoFormatter.date(from: dateString) {
+            return dateFormatter.string(from: date)
+        } else {
+            return dateString
+        }
+    }
+}
+import SwiftUI
+import MapKit
+
+struct MapView: UIViewRepresentable {
+    @Binding var region: MKCoordinateRegion
+    @Binding var stopsWithDirections: [StopWithDirections]
+    @Binding var bikeStops: [BikeStop]
+    @Binding var forceUpdate: Bool
+    var showsUserLocation: Bool
+    var onRegionChange: (MKCoordinateRegion) -> Void
+    var onStopsRequest: (CLLocationCoordinate2D, Double) -> Void
+    var onStopClick: (StopWithDirections, Direction) -> Void
+
+    func makeUIView(context: Context) -> MKMapView {
+        let mapView = MKMapView(frame: .zero)
+        mapView.delegate = context.coordinator
+        mapView.showsUserLocation = showsUserLocation
+        mapView.mapType = .mutedStandard
+        mapView.setRegion(region, animated: true)
+        return mapView
+    }
+
+    func updateUIView(_ uiView: MKMapView, context: Context) {
+        if forceUpdate {
+            uiView.setRegion(region, animated: true)
+        }
+
+        // Efficiently update annotations
+        let existingAnnotations = uiView.annotations
+        uiView.removeAnnotations(existingAnnotations)
+
+        var newAnnotations: [MKPointAnnotation] = []
+
+        // Add Transport Stops with Directions (max 2 per stop)
+        for stop in stopsWithDirections {
+            let baseCoordinate = CLLocationCoordinate2D(latitude: stop.coordinate.x!, longitude: stop.coordinate.y!)
+            let offsetDistance = 0.00005
+            for (index, direction) in stop.directions.enumerated() {
+                guard index < 2 else { break } // Ensure at most 2 directions
+                let annotation = MKPointAnnotation()
+                annotation.title = stop.name
+                annotation.subtitle = direction.to
+                // Offset the coordinate slightly to prevent overlap
+                let offsetLatitude = baseCoordinate.latitude + (Double(index) * offsetDistance)
+                let offsetLongitude = baseCoordinate.longitude + (Double(index % 2) * offsetDistance)
+                annotation.coordinate = CLLocationCoordinate2D(latitude: offsetLatitude, longitude: offsetLongitude)
+                newAnnotations.append(annotation)
+            }
+        }
+        uiView.addAnnotations(newAnnotations)
+
+        // Add Bike Stops (unchanged)
+        let bikeAnnotations = bikeStops.map { stop -> MKPointAnnotation in
+            let annotation = MKPointAnnotation()
+            annotation.title = stop.name
+            annotation.subtitle = "bike"
+            annotation.coordinate = CLLocationCoordinate2D(latitude: stop.latitude, longitude: stop.longitude)
+            return annotation
+        }
+        uiView.addAnnotations(bikeAnnotations)
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self, onRegionChange: onRegionChange, onStopsRequest: onStopsRequest, onStopClick: onStopClick)
+    }
+
+    class Coordinator: NSObject, MKMapViewDelegate {
+        var parent: MapView
+        var onRegionChange: (MKCoordinateRegion) -> Void
+        var onStopsRequest: (CLLocationCoordinate2D, Double) -> Void
+        var onStopClick: (StopWithDirections, Direction) -> Void
+        private var regionChangeTimer: Timer?
+
+        init(_ parent: MapView, onRegionChange: @escaping (MKCoordinateRegion) -> Void, onStopsRequest: @escaping (CLLocationCoordinate2D, Double) -> Void, onStopClick: @escaping (StopWithDirections, Direction) -> Void) {
+            self.parent = parent
+            self.onRegionChange = onRegionChange
+            self.onStopsRequest = onStopsRequest
+            self.onStopClick = onStopClick
+        }
+
+        func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
+            regionChangeTimer?.invalidate()
+            regionChangeTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { _ in
+                let center = mapView.centerCoordinate
+                let radius = self.getRadius(of: mapView)
+                if radius <= 1000 {
+                    self.onStopsRequest(center, radius)
+                }
+                self.onRegionChange(mapView.region)
+            }
+        }
+
+        func getRadius(of mapView: MKMapView) -> Double {
+            let centerLocation = CLLocation(latitude: mapView.centerCoordinate.latitude, longitude: mapView.centerCoordinate.longitude)
+            let topCenterCoordinate = mapView.convert(CGPoint(x: mapView.frame.size.width / 2.0, y: 0), toCoordinateFrom: mapView)
+            let topCenterLocation = CLLocation(latitude: topCenterCoordinate.latitude, longitude: topCenterCoordinate.longitude)
+            return centerLocation.distance(from: topCenterLocation)
+        }
+
+        func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
+            if annotation is MKPointAnnotation {
+                let identifier = "StopAnnotation"
+                var annotationView = mapView.dequeueReusableAnnotationView(withIdentifier: identifier)
+
+                if annotationView == nil {
+                    annotationView = MKAnnotationView(annotation: annotation, reuseIdentifier: identifier)
+                    annotationView?.canShowCallout = true
+                    annotationView?.frame = CGRect(x: 0, y: 0, width: 34, height: 34)
+                    annotationView?.layer.cornerRadius = 17
+                } else {
+                    annotationView?.annotation = annotation
+                }
+
+                annotationView?.backgroundColor = UIColor(white: 1.0, alpha: 0.9)
+                annotationView?.layer.borderColor = UIColor.gray.cgColor
+                annotationView?.layer.borderWidth = 3
+                return annotationView
+            }
+            return nil
+        }
+
+        func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
+            guard let annotation = view.annotation as? MKPointAnnotation,
+                  let stopName = annotation.title,
+                  let directionTo = annotation.subtitle else { return }
+
+            // Find the corresponding stop and direction
+            if let stopWithDirections = parent.stopsWithDirections.first(where: { $0.name == stopName }) {
+                if let direction = stopWithDirections.directions.first(where: { $0.to == directionTo }) {
+                    onStopClick(stopWithDirections, direction)
+                }
+            }
+        }
+    }
+}
+import SwiftUI
+import MapKit
+
+struct ContentView: View {
+    @StateObject private var locationManager = LocationManager()
+    @ObservedObject private var transportService = TransportAPIService()
+    @ObservedObject private var bikeService = BikeAPIService()
+
+    @State private var region: MKCoordinateRegion = MKCoordinateRegion(
+        center: CLLocationCoordinate2D(latitude: 46.5247, longitude: 6.5690),
+        span: MKCoordinateSpan(latitudeDelta: 0.02, longitudeDelta: 0.02)
+    )
+    @State private var stopsWithDirections: [StopWithDirections] = []
+    @State private var bikeStops: [BikeStop] = []
+    @State private var forceUpdate = false
+    @State private var shouldRecenterToUser = false
+    @State private var hasManuallyRecentered = false
+    @State private var selectedStopWithDirection: (StopWithDirections, Direction)?
+    @State private var isShowingTimetable = false
+
+    var body: some View {
+        ZStack {
+            MapView(
+                region: $region,
+                stopsWithDirections: $stopsWithDirections,
+                bikeStops: $bikeStops,
+                forceUpdate: $forceUpdate,
+                showsUserLocation: true,
+                onRegionChange: { newRegion in
+                    region = newRegion
+                    hasManuallyRecentered = true
+                },
+                onStopsRequest: { centerCoordinate, radius in
+                    if radius <= 1000 {
+                        transportService.fetchStops(latitude: centerCoordinate.latitude, longitude: centerCoordinate.longitude)
+                    }
+                },
+                onStopClick: { stopWithDirections, direction in
+                    selectedStopWithDirection = (stopWithDirections, direction)
+                    isShowingTimetable = true
+                }
+            )
+            .onChange(of: transportService.stopsWithDirections) { newStops in
+                stopsWithDirections = newStops
+            }
+            .onAppear {
+                locationManager.requestLocationUpdate()
+                bikeService.fetchBikeStations()
+            }
+            .onChange(of: bikeService.bikeStops) { newBikeStops in
+                bikeStops = newBikeStops
+            }
+            .edgesIgnoringSafeArea(.all)
+
+            VStack {
+                Spacer()
+                HStack {
+                    Spacer()
+                    Button(action: {
+                        if let userLocation = locationManager.userLocation {
+                            region = MKCoordinateRegion(
+                                center: userLocation.coordinate,
+                                span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
+                            )
+                            forceUpdate.toggle()
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                forceUpdate.toggle()
+                            }
+                            shouldRecenterToUser = true
+                            hasManuallyRecentered = true
+                        } else {
+                            locationManager.requestLocationUpdate()
+                        }
+                    }) {
+                        Image(systemName: "location.fill")
+                            .foregroundColor(.white)
+                            .padding()
+                            .background(Color.blue)
+                            .clipShape(Circle())
+                            .shadow(radius: 5)
+                    }
+                    .padding(.trailing, 20)
+                    .padding(.bottom, 40)
+                }
+            }
+        }
+        .onReceive(locationManager.$userLocation) { newLocation in
+            if let userLocation = newLocation, shouldRecenterToUser {
+                region = MKCoordinateRegion(
+                    center: userLocation.coordinate,
+                    span: MKCoordinateSpan(latitudeDelta: 0.02, longitudeDelta: 0.02)
+                )
+                forceUpdate.toggle()
+                shouldRecenterToUser = false
+            }
+        }
+        .sheet(isPresented: $isShowingTimetable) {
+            if let (stop, direction) = selectedStopWithDirection {
+                TimetableView(stop: stop, direction: direction)
+            }
+        }
+    }
+}
+import Foundation
+import CoreLocation
+
+class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
+    @Published var userLocation: CLLocation?
+    private let locationManager = CLLocationManager()
+
+    override init() {
+        super.init()
+        locationManager.delegate = self
+        locationManager.desiredAccuracy = kCLLocationAccuracyBest
+        locationManager.requestWhenInUseAuthorization()
+        locationManager.startUpdatingLocation()
+    }
+
+    func requestLocationUpdate() {
+        locationManager.requestLocation()
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        if let location = locations.first {
+            userLocation = location
+            locationManager.stopUpdatingLocation() // Stop after getting location to save battery
+        }
+    }
+
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        print("Error getting user location: \(error.localizedDescription)")
+    }
+}
+import Foundation
+
+struct StationboardEntry: Codable, Identifiable, Equatable {
+    let id = UUID()
+    let name: String
+    let category: String
+    let number: String
+    let to: String
+    let stop: Stop
+}
+import Foundation
+
+struct StopWithDirections: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let coordinate: Coordinate
+    let directions: [Direction]
+}
+
+struct Direction: Equatable {
+    let to: String
+    let entries: [StationboardEntry]
+}
+import Foundation
+
+struct StationboardResponse: Codable {
+    let stationboard: [StationboardEntry]
+}
+
+import Foundation
+
+struct BikeStop: Codable, Identifiable, Equatable {
+    let id: Int
+    let latitude: Double
+    let longitude: Double
+    let state: BikeStationState?
+    let name: String
+    let address: String?
+    let zip: String?
+    let city: String?
+    let vehicles: [BikeVehicle]?
+    let network: Network?
+    let sponsors: [Sponsor]?
+    let isVirtualStation: Bool?
+    let capacity: Int?
+
+    static func == (lhs: BikeStop, rhs: BikeStop) -> Bool {
+        return lhs.id == rhs.id &&
+               lhs.latitude == rhs.latitude &&
+               lhs.longitude == rhs.longitude &&
+               lhs.name == rhs.name
+    }
+}
+
+struct BikeStationState: Codable {
+    let id: Int
+    let name: String
+}
+
+struct BikeVehicle: Codable {
+    let id: Int
+    let name: String
+    let ebikeBatteryLevel: Double?
+    let type: VehicleType
+}
+
+struct VehicleType: Codable {
+    let id: Int
+    let name: String
+}
+
+struct Network: Codable {
+    let id: Int
+    let name: String
+    let backgroundImg: String?
+    let logoImg: String?
+    let sponsors: [Sponsor]?
+}
+
+struct Sponsor: Codable {
+    // Define sponsor properties if needed
+}
+import Foundation
+
+struct Coordinate: Codable, Equatable {
+    let x: Double?
+    let y: Double?
+}
+import Foundation
+
+struct Station: Codable, Equatable {
+    let id: String
+    let name: String
+    let coordinate: Coordinate
+}
+import Foundation
+
+struct TransportStop: Codable, Identifiable, Equatable {
+    let id: String?
+    let name: String
+    let coordinate: Coordinate
+    let icon: String?
+
+    static func == (lhs: TransportStop, rhs: TransportStop) -> Bool {
+        return lhs.id == rhs.id && lhs.name == rhs.name && lhs.coordinate == rhs.coordinate
+    }
+}
+import Foundation
+
+struct StopsResponse: Codable {
+    let stations: [TransportStop]
+}
+import Foundation
+
+struct Stop: Codable, Equatable {
+    let station: Station
+    let departure: String
+}
+import Foundation
+import MapKit
+
+struct Route: Identifiable, Equatable {
+    let id: UUID
+    let name: String
+    let startPoint: CLLocationCoordinate2D
+    let endPoint: CLLocationCoordinate2D
+    let distance: Double
+    let estimatedTime: TimeInterval
+
+    static func == (lhs: Route, rhs: Route) -> Bool {
+        return lhs.id == rhs.id
+    }
+}
+import Foundation
+import Combine
+import CoreLocation
+
+class BikeAPIService: ObservableObject {
+    @Published var bikeStops: [BikeStop] = []
+    let lausanneLocation = CLLocation(latitude: 46.5191, longitude: 6.6323)
+    func fetchBikeStations() {
+        let urlString = "https://api.publibike.ch/v1/public/partner/stations"
+        guard let url = URL(string: urlString) else {
+            print("Invalid URL")
+            return
+        }
+
+        let task = URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
+            guard let self = self else { return }
+            guard let data = data, error == nil else {
+                print("Error fetching Publibike stations: \(String(describing: error))")
+                return
+            }
+
+            do {
+                let decoder = JSONDecoder()
+                let bikeResponse = try decoder.decode(BikeStationResponse.self, from: data)
+                let stationsWithinRadius = bikeResponse.stations.filter { station in
+                    let stationLocation = CLLocation(latitude: station.latitude, longitude: station.longitude)
+                    let distance = self.lausanneLocation.distance(from: stationLocation) / 1000
+                    return distance <= 5
+                }
+
+                DispatchQueue.main.async {
+                    self.bikeStops = stationsWithinRadius
+                }
+            } catch {
+                print("Error decoding bike stops: \(error)")
+            }
+        }
+        task.resume()
+    }
+}
+
+struct BikeStationResponse: Codable {
+    let stations: [BikeStop]
+}
+import Foundation
+import Combine
+
+class TransportAPIService: ObservableObject {
+    @Published var stopsWithDirections: [StopWithDirections] = []
+    private var stopsCache: [String: [StopWithDirections]] = [:]
+    private var stationboardCache: [String: [StationboardEntry]] = [:]
+    
+    func fetchStops(latitude: Double, longitude: Double) {
+        let urlString = "https://transport.opendata.ch/v1/locations?x=\(latitude)&y=\(longitude)&type=station"
+        guard let url = URL(string: urlString) else {
+            print("Invalid URL for fetching stops")
+            return
+        }
+        
+        if let cachedStops = stopsCache["\(latitude),\(longitude)"] {
+            DispatchQueue.main.async {
+                self.stopsWithDirections = cachedStops
+            }
+            return
+        }
+        
+        let task = URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
+            guard let self = self else { return }
+            guard let data = data, error == nil else {
+                print("Error fetching stops: \(String(describing: error))")
+                return
+            }
+            
+            do {
+                let stopsResponse = try JSONDecoder().decode(StopsResponse.self, from: data)
+                // Filter out stops without valid coordinates
+                let validStops = stopsResponse.stations.filter { $0.coordinate.x != nil && $0.coordinate.y != nil }
+                var stopsWithDirections: [StopWithDirections] = []
+                
+                let group = DispatchGroup()
+                
+                for stop in validStops {
+                    guard let stopId = stop.id else { continue }
+                    group.enter()
+                    self.fetchStationboard(for: stopId) { stationboard in
+                        let groupedDirections = self.groupDirections(stationboard)
+                        let stopWithDirections = StopWithDirections(
+                            id: stopId,
+                            name: stop.name,
+                            coordinate: stop.coordinate,
+                            directions: groupedDirections
+                        )
+                        stopsWithDirections.append(stopWithDirections)
+                        group.leave()
+                    }
+                }
+                
+                group.notify(queue: .main) {
+                    self.stopsWithDirections = stopsWithDirections
+                    self.stopsCache["\(latitude),\(longitude)"] = stopsWithDirections
+                }
+            } catch {
+                print("Error decoding stops: \(error)")
+            }
+        }
+        task.resume()
+    }
+    
+    // Existing fetchStationboard function with caching
+    func fetchStationboard(for stationId: String, completion: @escaping ([StationboardEntry]) -> Void) {
+        if let cachedStationboard = stationboardCache[stationId] {
+            completion(cachedStationboard)
+            return
+        }
+        
+        let urlString = "https://transport.opendata.ch/v1/stationboard?id=\(stationId)&limit=50"
+        guard let url = URL(string: urlString) else {
+            print("Invalid URL for stationboard")
+            return
+        }
+        
+        let task = URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
+            guard let data = data, error == nil else {
+                print("Error fetching stationboard data: \(String(describing: error))")
+                return
+            }
+            
+            do {
+                let response = try JSONDecoder().decode(StationboardResponse.self, from: data)
+                DispatchQueue.main.async {
+                    self?.stationboardCache[stationId] = response.stationboard
+                    completion(response.stationboard)
+                }
+            } catch {
+                print("Error decoding stationboard data: \(error)")
+            }
+        }
+        task.resume()
+    }
+    
+    // New method to group directions
+    private func groupDirections(_ stationboard: [StationboardEntry]) -> [Direction] {
+        // Group stationboard entries by 'to' field
+        let groupedByDestination = Dictionary(grouping: stationboard) { entry -> String in
+            // Clean up the destination name to group similar destinations
+            return normalizeDestination(entry.to)
+        }
+        
+        // Sort the groups by the number of entries
+        let sortedGroups = groupedByDestination.sorted { $0.value.count > $1.value.count }
+        
+        // Limit to at most 2 groups
+        let limitedGroups = sortedGroups.prefix(2)
+        
+        // Create Direction objects
+        let directions = limitedGroups.map { (destination, entries) -> Direction in
+            return Direction(to: destination, entries: entries)
+        }
+        
+        return directions
+    }
+    
+    private func normalizeDestination(_ destination: String) -> String {
+        // Implement a normalization function to group similar destinations
+        // For simplicity, we'll remove any text after a comma and trim whitespace
+        let components = destination.components(separatedBy: ",")
+        return components.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? destination
+    }
+}
+//
+//  epfl_travelApp.swift
+//  epfl-travel
+//
+//  Created by Barni Szalai on 19/09/2024.
+//
+
+import SwiftUI
+
+@main
+struct epfl_travelApp: App {
+    var body: some Scene {
+        WindowGroup {
+            ContentView()
+        }
+    }
+}

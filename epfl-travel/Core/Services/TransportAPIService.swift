@@ -29,7 +29,6 @@ class TransportAPIService: ObservableObject {
             
             do {
                 let stopsResponse = try JSONDecoder().decode(StopsResponse.self, from: data)
-                // Filter out stops without valid coordinates
                 let validStops = stopsResponse.stations.filter { $0.coordinate.x != nil && $0.coordinate.y != nil }
                 var stopsWithDirections: [StopWithDirections] = []
                 
@@ -38,7 +37,9 @@ class TransportAPIService: ObservableObject {
                 for stop in validStops {
                     guard let stopId = stop.id else { continue }
                     group.enter()
-                    self.fetchStationboard(for: stopId) { stationboard in
+                    
+                    // Fetch the stationboard with the correct station name
+                    self.fetchStationboard(for: stopId, stationName: stop.name) { stationboard in
                         let groupedDirections = self.groupDirections(stationboard)
                         let stopWithDirections = StopWithDirections(
                             id: stopId,
@@ -63,7 +64,7 @@ class TransportAPIService: ObservableObject {
     }
     
     // Existing fetchStationboard function with caching
-    func fetchStationboard(for stationId: String, completion: @escaping ([StationboardEntry]) -> Void) {
+    func fetchStationboard(for stationId: String, stationName: String, completion: @escaping ([StationboardEntry]) -> Void) {
         if let cachedStationboard = stationboardCache[stationId] {
             completion(cachedStationboard)
             return
@@ -76,6 +77,7 @@ class TransportAPIService: ObservableObject {
         }
         
         let task = URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
+            guard let self = self else { return }
             guard let data = data, error == nil else {
                 print("Error fetching stationboard data: \(String(describing: error))")
                 return
@@ -83,9 +85,27 @@ class TransportAPIService: ObservableObject {
             
             do {
                 let response = try JSONDecoder().decode(StationboardResponse.self, from: data)
+                
+                var updatedStationboard = response.stationboard.map { entry -> StationboardEntry in
+                    var modifiedEntry = entry
+                    
+                    // Remove any unknown stops in the passList (where stop names are nil or empty)
+                    if let passList = entry.passList {
+                        modifiedEntry.passList = passList.filter { $0.station.name != nil && !$0.station.name!.isEmpty }
+                    }
+                    
+                    // Remove the first stop if it's the same as the current station
+                    if let firstStop = modifiedEntry.passList?.first, firstStop.station.name == stationName {
+                        modifiedEntry.passList?.removeFirst()
+                    }
+
+                    return modifiedEntry
+                }
+                
+                // Cache the modified stationboard
                 DispatchQueue.main.async {
-                    self?.stationboardCache[stationId] = response.stationboard
-                    completion(response.stationboard)
+                    self.stationboardCache[stationId] = updatedStationboard
+                    completion(updatedStationboard)
                 }
             } catch {
                 print("Error decoding stationboard data: \(error)")
